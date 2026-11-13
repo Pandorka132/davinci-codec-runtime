@@ -31,6 +31,10 @@ using FrameUnrefFn = void (*)(AVFrame *);
 using FrameCopyPropsFn = int (*)(AVFrame *, const AVFrame *);
 using FrameGetBufferFn = int (*)(AVFrame *, int);
 using FrameCopyFn = int (*)(AVFrame *, const AVFrame *);
+using FrameNewSideDataFn = AVFrameSideData *(*)(AVFrame *, enum AVFrameSideDataType, size_t);
+using DictGetFn = const AVDictionaryEntry *(*)(const AVDictionary *, const char *,
+                                               const AVDictionaryEntry *, int);
+using DictSetFn = int (*)(AVDictionary **, const char *, const char *, int);
 using BufferAllocFn = AVBufferRef *(*)(size_t);
 
 struct ProviderApi {
@@ -50,6 +54,9 @@ struct ProviderApi {
     FrameCopyPropsFn frame_copy_props;
     FrameGetBufferFn frame_get_buffer;
     FrameCopyFn frame_copy;
+    FrameNewSideDataFn frame_new_side_data;
+    DictGetFn dict_get;
+    DictSetFn dict_set;
     BufferAllocFn buffer_alloc;
 };
 
@@ -144,13 +151,20 @@ bool load_frame_api(void *handle, const char *util_version,
         handle, "av_frame_get_buffer", util_version);
     api->frame_copy = resolve_versioned<FrameCopyFn>(
         handle, "av_frame_copy", util_version);
+    api->frame_new_side_data = resolve_versioned<FrameNewSideDataFn>(
+        handle, "av_frame_new_side_data", util_version);
+    api->dict_get = resolve_versioned<DictGetFn>(
+        handle, "av_dict_get", util_version);
+    api->dict_set = resolve_versioned<DictSetFn>(
+        handle, "av_dict_set", util_version);
     api->buffer_alloc = resolve_versioned<BufferAllocFn>(
         handle, "av_buffer_alloc", util_version);
 
     return api->frame_alloc != nullptr && api->frame_free != nullptr &&
            api->frame_unref != nullptr && api->frame_copy_props != nullptr &&
            api->frame_get_buffer != nullptr && api->frame_copy != nullptr &&
-           api->buffer_alloc != nullptr;
+           api->frame_new_side_data != nullptr && api->dict_get != nullptr &&
+           api->dict_set != nullptr && api->buffer_alloc != nullptr;
 }
 
 void close_partial_private_handles() noexcept {
@@ -230,6 +244,21 @@ bool register_context(AVCodecContext *context) noexcept {
     return true;
 }
 
+int copy_dictionary_from_private(AVDictionary **destination,
+                                 const AVDictionary *source) noexcept {
+    if (destination == nullptr) return AVERROR(EINVAL);
+    if (source == nullptr) return 0;
+
+    const AVDictionaryEntry *entry = nullptr;
+    while ((entry = private_api.dict_get(
+                source, "", entry, AV_DICT_IGNORE_SUFFIX)) != nullptr) {
+        const int result = resolve_api.dict_set(
+            destination, entry->key, entry->value, AV_DICT_MULTIKEY);
+        if (result < 0) return result;
+    }
+    return 0;
+}
+
 int copy_private_frame_to_resolve(AVFrame *destination,
                                   AVFrame *source) noexcept {
     if (destination == nullptr || source == nullptr ||
@@ -238,21 +267,61 @@ int copy_private_frame_to_resolve(AVFrame *destination,
         source->private_ref != nullptr)
         return AVERROR(EINVAL);
 
-    /* Never give Resolve libavutil a private-namespace AVBufferRef to free.
-       Deep-copy the properties/side data and pixel planes into buffers
-       allocated by Resolve's own libavutil. */
+    /* Never pass the private dictionary, side-data, or AVBufferRef objects
+       into Resolve libavutil. Let the matching owner copy each object. */
     resolve_api.frame_unref(destination);
     destination->format = source->format;
     destination->width = source->width;
     destination->height = source->height;
 
+    AVDictionary *source_metadata = source->metadata;
+    AVFrameSideData **source_side_data = source->side_data;
+    const int source_side_data_count = source->nb_side_data;
     AVBufferRef *source_opaque_ref = source->opaque_ref;
+
+    source->metadata = nullptr;
+    source->side_data = nullptr;
+    source->nb_side_data = 0;
     source->opaque_ref = nullptr;
     const int props_result = resolve_api.frame_copy_props(destination, source);
+    source->metadata = source_metadata;
+    source->side_data = source_side_data;
+    source->nb_side_data = source_side_data_count;
     source->opaque_ref = source_opaque_ref;
     if (props_result < 0) {
         resolve_api.frame_unref(destination);
         return props_result;
+    }
+
+    int result = copy_dictionary_from_private(
+        &destination->metadata, source_metadata);
+    if (result < 0) {
+        resolve_api.frame_unref(destination);
+        return result;
+    }
+
+    for (int index = 0; index < source_side_data_count; ++index) {
+        const AVFrameSideData *source_entry = source_side_data[index];
+        if (source_entry == nullptr || source_entry->data == nullptr ||
+            source_entry->size > static_cast<size_t>(INT_MAX)) {
+            resolve_api.frame_unref(destination);
+            return AVERROR(EINVAL);
+        }
+        AVFrameSideData *destination_entry = resolve_api.frame_new_side_data(
+            destination, source_entry->type, source_entry->size);
+        if (destination_entry == nullptr) {
+            resolve_api.frame_unref(destination);
+            return AVERROR(ENOMEM);
+        }
+        if (source_entry->size != 0U)
+            std::memcpy(destination_entry->data, source_entry->data,
+                        source_entry->size);
+        result = copy_dictionary_from_private(
+            &destination_entry->metadata, source_entry->metadata);
+        if (result < 0) {
+            resolve_api.frame_unref(destination);
+            return result;
+        }
     }
 
     if (source_opaque_ref != nullptr) {
@@ -267,7 +336,7 @@ int copy_private_frame_to_resolve(AVFrame *destination,
         destination->opaque_ref = copy;
     }
 
-    int result = resolve_api.frame_get_buffer(destination, 32);
+    result = resolve_api.frame_get_buffer(destination, 32);
     if (result >= 0)
         result = resolve_api.frame_copy(destination, source);
     if (result < 0) resolve_api.frame_unref(destination);
