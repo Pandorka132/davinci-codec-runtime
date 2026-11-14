@@ -15,10 +15,24 @@ extern "C" {
 /*
  * Explicit, one-shot initialization. `private_ffmpeg_root` contains the
  * libavcodec/ and libavutil/ subdirectories of the private FFmpeg 6.1.6 build.
- * The original Resolve FFmpeg60 provider is discovered in RTLD_DEFAULT.
+ * The private DSOs use unique libdavinci_* SONAMEs and are loaded with
+ * RTLD_DEEPBIND in the base linker namespace so VA-API/oneVPL driver plugins
+ * can load normally. Resolve's original FFmpeg60 provider is discovered in
+ * RTLD_DEFAULT. QSV is preferred when one accessible Intel render node exists;
+ * otherwise AV1 falls back to private libdav1d.
  */
 DAVINCI_CODEC_RUNTIME_API int davinci_codec_runtime_initialize_ffmpeg(
     const char *private_ffmpeg_root) noexcept;
+/*
+ * Call only after the owning application has quiesced every caller and
+ * released every AVCodec* returned by find_decoder, and all contexts have been
+ * freed. The entry gate drains wrappers already executing and rejects new ones,
+ * but cannot revoke a raw AVCodec* pointer after find_decoder returns. Returns
+ * -2 while any private AVCodecContext remains registered, and -3 if a private
+ * dlclose fails. A successful shutdown is not a substitute for caller-side
+ * global quiescence.
+ */
+DAVINCI_CODEC_RUNTIME_API int davinci_codec_runtime_shutdown_ffmpeg() noexcept;
 DAVINCI_CODEC_RUNTIME_API int davinci_codec_runtime_ffmpeg_ready() noexcept;
 DAVINCI_CODEC_RUNTIME_API const char *davinci_codec_runtime_ffmpeg_error() noexcept;
 DAVINCI_CODEC_RUNTIME_API unsigned int davinci_codec_runtime_private_avcodec_version() noexcept;

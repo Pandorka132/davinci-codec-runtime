@@ -8,3 +8,18 @@
 *.o
 *.a
 *.log
+/.idea
+# Local-only diagnostic script copies; production startup uses the session pair.
+/installer/run_resolve_av1_preflight.sh
+/installer/run_resolve_av1_bootstrap_probe.sh
+/installer/run_resolve_av1_provider_probe.sh
+/installer/run_resolve_av1_session_controller_probe.sh
+/installer/run_resolve_av1_transaction_probe.sh
+/installer/gdb/resolve_av1_preflight_observe.gdb
+/installer/gdb/resolve_av1_bootstrap_probe.gdb
+/installer/gdb/resolve_av1_provider_probe.gdb
+/installer/gdb/resolve_av1_session_controller_probe.gdb
+/installer/gdb/resolve_av1_transaction_probe.gdb
+
+# Legacy local FFmpeg source archive; build.sh downloads into ignored build/.
+/third_party/ffmpeg*.tar.xz
